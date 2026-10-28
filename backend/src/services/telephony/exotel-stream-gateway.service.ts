@@ -28,17 +28,22 @@ import {
   extractPcmFromWav,
   calculatePcmRms,
   chunkAudioBuffer,
+  chunkExotelAudioBuffer,
 } from "./audio-codec.js";
 import { env } from "../../config/env.js";
 
 // VAD & Buffering Constants
-const SILENCE_ENERGY_THRESHOLD = 400; // RMS threshold for voice activity on 16-bit PCM (elevated to ignore telephony line hiss)
+const SILENCE_ENERGY_THRESHOLD = 180; // RMS threshold for voice activity on 16-bit PCM (calibrated for cellular/telephony speech vs line hiss)
+const BARGE_IN_ENERGY_THRESHOLD = 350; // Higher RMS threshold required to trigger caller barge-in during assistant playback
 const SILENCE_CHUNKS_THRESHOLD = 45; // ~900ms of consecutive silence after speech (20ms frames)
-const MIN_SPEECH_CHUNKS = 12; // Minimum ~240ms of accumulated speech before triggering STT
+const SILENCE_MS_THRESHOLD = 800; // ~800ms of accumulated silence duration after speech
+const MIN_SPEECH_CHUNKS = 12; // Minimum ~240ms of accumulated speech before triggering STT (20ms frames)
+const MIN_SPEECH_MS = 200; // Minimum 200ms of accumulated speech before triggering STT
 const MAX_TURN_CHUNKS = 350; // Maximum ~7 seconds of accumulated audio per speech turn
 const NO_SPEECH_TIMEOUT_MS = 7000; // 7 seconds wait time for caller to start speaking before reprompting
 export const FRAME_CHUNK_SIZE_MULAW = 160; // 20ms of 8kHz 8-bit μ-law audio
 export const FRAME_CHUNK_SIZE_PCM = 320; // 20ms of 8kHz 16-bit linear PCM audio
+export const EXOTEL_STREAM_CHUNK_SIZE_PCM = 3200; // 200ms of 8kHz 16-bit linear PCM audio (Exotel compliant: >= 3.2KB and 10 * 320 bytes)
 
 export interface StreamSessionContext {
   streamSid: string | null;
@@ -55,6 +60,8 @@ export interface StreamSessionContext {
   durationTimer: NodeJS.Timeout | null;
   audioBufferChunks: Buffer[];
   turnSilenceChunks: number;
+  turnSilenceMs?: number;
+  turnSpeechMs?: number;
   turnTotalChunks: number;
   isProcessingTurn: boolean;
   isPlayingGreeting: boolean;
@@ -67,6 +74,7 @@ export interface StreamSessionContext {
   isWaitingForCaller?: boolean;
   initialGreetingSent: boolean;
   isStopped: boolean;
+  bargeInFrames?: number;
 }
 
 export class ExotelStreamGatewayService {
@@ -133,7 +141,7 @@ export class ExotelStreamGatewayService {
       sessionId: null,
       session: null,
       mediaFormat: {
-        encoding: "audio/x-mulaw",
+        encoding: "audio/x-linear",
         sampleRate: 8000,
         channels: 1,
       },
@@ -146,6 +154,8 @@ export class ExotelStreamGatewayService {
       durationTimer: null,
       audioBufferChunks: [],
       turnSilenceChunks: 0,
+      turnSilenceMs: 0,
+      turnSpeechMs: 0,
       turnTotalChunks: 0,
       isProcessingTurn: false,
       isPlayingGreeting: false,
@@ -158,6 +168,7 @@ export class ExotelStreamGatewayService {
       isWaitingForCaller: false,
       initialGreetingSent: false,
       isStopped: false,
+      bargeInFrames: 0,
     };
 
     const maxDurationSec = env.VOICE_MAX_CALL_DURATION_SEC || 300;
@@ -260,6 +271,10 @@ export class ExotelStreamGatewayService {
         this.handleMarkEvent(socket, context, event);
         break;
 
+      case "clear":
+        this.handleClearEvent(socket, context, event);
+        break;
+
       default:
         // Safely ignore unknown events
         break;
@@ -292,10 +307,12 @@ export class ExotelStreamGatewayService {
     context.callSid = callSid;
 
     const format = startData.mediaFormat || startData.media_format || event.mediaFormat || {};
+    const rawEncoding = (format.encoding || format.format || startData.encoding || "").toString().toLowerCase();
+    const isMulaw = rawEncoding.includes("mulaw") || rawEncoding.includes("pcmu") || rawEncoding.includes("g711u");
     context.mediaFormat = {
-      encoding: format.encoding || "audio/x-mulaw",
-      sampleRate: format.sampleRate || format.sample_rate || 8000,
-      channels: format.channels || 1,
+      encoding: isMulaw ? "audio/x-mulaw" : "audio/x-linear",
+      sampleRate: Number(format.sampleRate || format.sample_rate) || 8000,
+      channels: Number(format.channels) || 1,
     };
 
     const customParams =
@@ -427,6 +444,7 @@ export class ExotelStreamGatewayService {
       streamSid: context.streamSid,
       markName,
       expectedMark: context.currentMarkName,
+      timestamp: new Date().toISOString(),
     });
 
     // If mark name doesn't match current active mark, ignore stale marks
@@ -435,6 +453,56 @@ export class ExotelStreamGatewayService {
     }
 
     this.onPlaybackFinished(socket, context, `mark:${markName || "acknowledged"}`);
+  }
+
+  /**
+   * Handles Exotel 'clear' event (telephony-side buffer flush / barge-in notification)
+   */
+  public handleClearEvent(
+    socket: WebSocket,
+    context: StreamSessionContext,
+    _event?: any
+  ): void {
+    if (context.isStopped) return;
+    console.log("🧹 [ExotelStreamGateway] Exotel 'clear' event handled (playback aborted/barge-in)", {
+      streamSid: context.streamSid,
+      wasPlayingOutbound: context.isPlayingOutbound,
+      wasPlayingGreeting: context.isPlayingGreeting,
+    });
+
+    if (context.playbackFallbackTimer) {
+      clearTimeout(context.playbackFallbackTimer);
+      context.playbackFallbackTimer = null;
+    }
+
+    context.isPlayingOutbound = false;
+    context.isPlayingGreeting = false;
+    context.currentMarkName = null;
+    context.bargeInFrames = 0;
+    context.audioBufferChunks = [];
+    context.turnSilenceChunks = 0;
+    context.turnSilenceMs = 0;
+    context.turnSpeechMs = 0;
+    context.turnTotalChunks = 0;
+    context.isWaitingForCaller = true;
+
+    this.startNoSpeechTimer(socket, context);
+  }
+
+  /**
+   * Sends an outbound 'clear' event to Exotel to immediately truncate playback on caller device
+   */
+  public sendClearToExotel(socket: WebSocket, context: StreamSessionContext): void {
+    if (socket.readyState === WebSocket.OPEN && context.streamSid) {
+      const clearMessage: ExotelStreamOutboundClearMessage = {
+        event: "clear",
+        streamSid: context.streamSid,
+      };
+      socket.send(JSON.stringify(clearMessage));
+      console.log("🧹 [ExotelStreamGateway] Sent outbound 'clear' message to Exotel", {
+        streamSid: context.streamSid,
+      });
+    }
   }
 
   /**
@@ -454,6 +522,7 @@ export class ExotelStreamGatewayService {
     context.isPlayingOutbound = false;
     context.isPlayingGreeting = false;
     context.currentMarkName = null;
+    context.bargeInFrames = 0;
 
     if (context.playbackFallbackTimer) {
       clearTimeout(context.playbackFallbackTimer);
@@ -463,6 +532,8 @@ export class ExotelStreamGatewayService {
     // Flush any acoustic echo/bleed-through accumulated during outbound playback
     context.audioBufferChunks = [];
     context.turnSilenceChunks = 0;
+    context.turnSilenceMs = 0;
+    context.turnSpeechMs = 0;
     context.turnTotalChunks = 0;
     context.isWaitingForCaller = true;
 
@@ -582,13 +653,7 @@ export class ExotelStreamGatewayService {
     context: StreamSessionContext,
     event: any
   ): Promise<void> {
-    // If assistant is currently speaking or processing, drop incoming audio to prevent self-echo feedback loop
-    if (
-      context.isStopped ||
-      context.isProcessingTurn ||
-      context.isPlayingOutbound ||
-      context.isPlayingGreeting
-    ) {
+    if (context.isStopped || context.isProcessingTurn) {
       return;
     }
 
@@ -606,12 +671,46 @@ export class ExotelStreamGatewayService {
 
     if (chunkBuffer.length === 0) return;
 
-    // Decode to 16-bit linear PCM for energy calculation
-    const pcmBuffer = context.mediaFormat.encoding.includes("mulaw")
+    // Decode to 16-bit linear PCM for energy and duration calculation
+    const isMulaw = context.mediaFormat.encoding.includes("mulaw");
+    const pcmBuffer = isMulaw
       ? mulawToLinear16(chunkBuffer)
       : chunkBuffer;
 
     const energy = calculatePcmRms(pcmBuffer);
+    const chunkDurationMs = Math.max(1, Math.round(pcmBuffer.length / 16));
+
+    // Handle caller barge-in during assistant playback
+    if (context.isPlayingOutbound || context.isPlayingGreeting) {
+      if (energy > BARGE_IN_ENERGY_THRESHOLD) {
+        context.bargeInFrames = (context.bargeInFrames || 0) + 1;
+        // Require 2 consecutive frames to distinguish speech from line pops
+        if (context.bargeInFrames >= 2) {
+          console.log("🗣️ [ExotelStreamGateway] Caller barge-in detected during playback", {
+            streamSid: context.streamSid,
+            energy: Math.round(energy),
+            bargeInFrames: context.bargeInFrames,
+          });
+
+          this.sendClearToExotel(socket, context);
+          this.handleClearEvent(socket, context);
+
+          // Seed speech buffer with initial caller interruption frame
+          context.audioBufferChunks.push(chunkBuffer);
+          context.turnSilenceChunks = 0;
+          context.turnSilenceMs = 0;
+          context.turnSpeechMs = chunkDurationMs;
+          context.turnTotalChunks = 1;
+          context.isWaitingForCaller = false;
+          return;
+        }
+      } else {
+        context.bargeInFrames = 0;
+      }
+      return;
+    }
+
+    context.bargeInFrames = 0;
 
     if (energy > SILENCE_ENERGY_THRESHOLD) {
       // Caller has started speaking! Immediately cancel the no-speech silence timer
@@ -632,19 +731,26 @@ export class ExotelStreamGatewayService {
       context.isWaitingForCaller = false;
       context.audioBufferChunks.push(chunkBuffer);
       context.turnSilenceChunks = 0;
+      context.turnSilenceMs = 0;
+      context.turnSpeechMs = (context.turnSpeechMs || 0) + chunkDurationMs;
       context.turnTotalChunks += 1;
     } else {
       // Frame is silent
       if (context.audioBufferChunks.length > 0) {
         context.audioBufferChunks.push(chunkBuffer);
         context.turnSilenceChunks += 1;
+        context.turnSilenceMs = (context.turnSilenceMs || 0) + chunkDurationMs;
         context.turnTotalChunks += 1;
 
-        // Turn Boundary 1: Silence detected after speech
-        if (
-          context.turnSilenceChunks >= SILENCE_CHUNKS_THRESHOLD &&
-          context.audioBufferChunks.length >= MIN_SPEECH_CHUNKS
-        ) {
+        // Turn Boundary 1: Silence detected after speech (chunks threshold OR duration threshold)
+        const isSilenceReached =
+          context.turnSilenceChunks >= SILENCE_CHUNKS_THRESHOLD ||
+          (context.turnSilenceMs || 0) >= SILENCE_MS_THRESHOLD;
+        const hasMinSpeech =
+          context.audioBufferChunks.length >= MIN_SPEECH_CHUNKS ||
+          (context.turnSpeechMs || 0) >= MIN_SPEECH_MS;
+
+        if (isSilenceReached && hasMinSpeech) {
           await this.processSpeechTurn(socket, context);
           return;
         }
@@ -652,10 +758,11 @@ export class ExotelStreamGatewayService {
     }
 
     // Turn Boundary 2: Maximum duration reached for current turn
-    if (
-      context.turnTotalChunks >= MAX_TURN_CHUNKS &&
-      context.audioBufferChunks.length >= MIN_SPEECH_CHUNKS
-    ) {
+    const hasMinSpeech =
+      context.audioBufferChunks.length >= MIN_SPEECH_CHUNKS ||
+      (context.turnSpeechMs || 0) >= MIN_SPEECH_MS;
+
+    if (context.turnTotalChunks >= MAX_TURN_CHUNKS && hasMinSpeech) {
       await this.processSpeechTurn(socket, context);
     }
   }
@@ -677,7 +784,15 @@ export class ExotelStreamGatewayService {
     const audioChunks = [...context.audioBufferChunks];
     context.audioBufferChunks = [];
     context.turnSilenceChunks = 0;
+    context.turnSilenceMs = 0;
+    context.turnSpeechMs = 0;
     context.turnTotalChunks = 0;
+    context.bargeInFrames = 0;
+    context.turnSilenceChunks = 0;
+    context.turnSilenceMs = 0;
+    context.turnSpeechMs = 0;
+    context.turnTotalChunks = 0;
+    context.bargeInFrames = 0;
 
     try {
       // Requirement 7: Verify Sarvam STT is not being called with an empty audio buffer
@@ -703,28 +818,35 @@ export class ExotelStreamGatewayService {
 
       // Synthesize WAV from accumulated telephony chunks
       const sampleRate = context.mediaFormat.sampleRate || 8000;
-      const wavBuffer = context.mediaFormat.encoding.includes("mulaw")
+      const isMulaw = context.mediaFormat.encoding.includes("mulaw");
+      const audioDurationMs = Math.round(fullTelephonyBuffer.length / (isMulaw ? 8 : 16));
+      const wavBuffer = isMulaw
         ? mulawToWav(fullTelephonyBuffer, sampleRate)
         : pcmToWav(fullTelephonyBuffer, sampleRate);
 
       const wavBase64 = wavBuffer.toString("base64");
 
-      console.log("🗣️ [ExotelStreamGateway] Sarvam STT", {
+      console.log("🗣️ [ExotelStreamGateway] Sarvam STT request dispatched", {
         streamSid: context.streamSid,
         turnCount: context.turnCount,
         audioLengthBytes: fullTelephonyBuffer.length,
+        audioDurationMs,
+        encoding: context.mediaFormat.encoding,
         language: context.language,
       });
 
       // Speech-to-Text via Sarvam saaras:v3
+      const sttStartTime = Date.now();
       const sttResult = await this.sarvamService.speechToText(wavBase64, context.language, "wav");
+      const sttDurationMs = Date.now() - sttStartTime;
       const transcript = sttResult?.transcript?.trim() || "";
 
       // Requirement 8: Logging for STT result
-      console.log("📝 [ExotelStreamGateway] STT result", {
+      console.log("📝 [ExotelStreamGateway] STT result received", {
         streamSid: context.streamSid,
         hasTranscript: Boolean(transcript),
         transcriptLength: transcript.length,
+        sttDurationMs,
         language: context.language,
       });
 
@@ -738,7 +860,7 @@ export class ExotelStreamGatewayService {
 
       console.log("📝 [ExotelStreamGateway] Sarvam STT Transcript:", {
         streamSid: context.streamSid,
-        transcript,
+        transcriptLength: transcript.length,
       });
 
       // Caller spoke actual words -> reset silence timeout count
@@ -785,16 +907,23 @@ export class ExotelStreamGatewayService {
         context.consecutiveFallbacks = 0;
       }
 
-      let responseText =
-        turnResponse?.textResponse ||
-        VoiceResponseFormatter.getDefaultFallbackPrompt(context.language);
-
-      // If caller has encountered 3 consecutive UNKNOWNs, avoid infinite fallback loop and conclude gracefully
-      if ((context.consecutiveFallbacks || 0) >= 3) {
-        responseText = VoiceResponseFormatter.getEndCall(context.language);
-        if (turnResponse) {
-          turnResponse.shouldEndCall = true;
+      let responseText = turnResponse?.textResponse;
+      if (turnResponse?.detectedIntent === "UNKNOWN") {
+        if (context.consecutiveFallbacks === 1) {
+          // First unknown: ask caller to repeat once clearly
+          responseText = VoiceResponseFormatter.getSttRetryPrompt(context.language);
+        } else if (context.consecutiveFallbacks === 2) {
+          // Second unknown: provide structured guidance / menu choices
+          responseText = VoiceResponseFormatter.getDefaultFallbackPrompt(context.language);
+        } else {
+          // Third unknown: conclude call gracefully
+          responseText = VoiceResponseFormatter.getEndCall(context.language);
+          if (turnResponse) {
+            turnResponse.shouldEndCall = true;
+          }
         }
+      } else if (!responseText) {
+        responseText = VoiceResponseFormatter.getDefaultFallbackPrompt(context.language);
       }
 
       console.log("🤖 [ExotelStreamGateway] Healthcare Assistant Response:", {
@@ -880,7 +1009,7 @@ export class ExotelStreamGatewayService {
   }
 
   /**
-   * Synthesizes text to speech via Sarvam bulbul:v3 and streams 20ms frames to Exotel over WebSocket.
+   * Synthesizes text to speech via Sarvam bulbul:v3 and streams Exotel-compliant frames over WebSocket.
    * Sets isPlayingOutbound to suppress incoming echo during playback, dispatches mark event,
    * and arms a fallback duration timer.
    */
@@ -908,13 +1037,15 @@ export class ExotelStreamGatewayService {
     }
 
     try {
-      console.log("🔊 [ExotelStreamGateway] Sarvam TTS", {
+      console.log("🔊 [ExotelStreamGateway] Sarvam TTS request dispatched", {
         streamSid: context.streamSid,
         language: context.language,
         markName,
       });
 
+      const ttsStartTime = Date.now();
       const ttsResult = await this.sarvamService.textToSpeech(text, context.language);
+      const ttsDurationMs = Date.now() - ttsStartTime;
       const ttsAudioBase64 = ttsResult?.audios?.[0];
 
       if (!ttsAudioBase64 || socket.readyState !== WebSocket.OPEN) {
@@ -926,22 +1057,36 @@ export class ExotelStreamGatewayService {
       const rawTtsBuffer = Buffer.from(ttsAudioBase64, "base64");
       const { pcmBuffer } = extractPcmFromWav(rawTtsBuffer);
 
-      const outboundAudio = context.mediaFormat.encoding.includes("mulaw")
+      const isMulaw = context.mediaFormat.encoding.includes("mulaw");
+      const outboundAudio = isMulaw
         ? linear16ToMulaw(pcmBuffer)
         : pcmBuffer;
 
-      const chunkSize = context.mediaFormat.encoding.includes("mulaw")
-        ? FRAME_CHUNK_SIZE_MULAW
-        : FRAME_CHUNK_SIZE_PCM;
+      // Use Exotel-compliant chunking for linear PCM (>= 3200 bytes, multiple of 320, padded with silence)
+      // For legacy mulaw, use 160-byte frames
+      const outboundFrames = isMulaw
+        ? chunkAudioBuffer(outboundAudio, FRAME_CHUNK_SIZE_MULAW)
+        : chunkExotelAudioBuffer(outboundAudio, EXOTEL_STREAM_CHUNK_SIZE_PCM, 320);
 
-      const outboundFrames = chunkAudioBuffer(outboundAudio, chunkSize);
+      // Calculate physical playback duration based on actual audio sample bytes
+      const sampleRate = context.mediaFormat.sampleRate || 8000;
+      const channels = context.mediaFormat.channels || 1;
+      const bytesPerSample = isMulaw ? 1 : 2;
+      const bytesPerMs = (sampleRate * channels * bytesPerSample) / 1000;
+      const playbackDurationMs = bytesPerMs > 0
+        ? Math.round(outboundAudio.length / bytesPerMs)
+        : outboundFrames.length * 20;
 
       // Requirement 8: Logging for response sent
       console.log("🔊 [ExotelStreamGateway] Streaming audio frames to Exotel", {
         streamSid: context.streamSid,
         frameCount: outboundFrames.length,
-        chunkSize,
+        chunkBytes: outboundFrames[0]?.length || 0,
+        totalBytes: outboundAudio.length,
+        playbackDurationMs,
+        ttsDurationMs,
         markName,
+        encoding: context.mediaFormat.encoding,
         language: context.language,
       });
 
@@ -969,11 +1114,8 @@ export class ExotelStreamGatewayService {
         socket.send(JSON.stringify(markMessage));
       }
 
-      // Calculate physical playback duration (20ms per audio frame)
-      const playbackDurationMs = outboundFrames.length * 20;
-
-      // Set fallback timer: for real speech audio (>100ms) wait full duration to mute echo; for tiny mock frames (<=100ms) use 15ms
-      const fallbackMs = playbackDurationMs > 100 ? playbackDurationMs : 15;
+      // Set fallback timer: for real speech audio (>100ms) wait full duration + 400ms margin to mute echo; for tiny mock frames (<=100ms) use 15ms
+      const fallbackMs = playbackDurationMs > 100 ? playbackDurationMs + 400 : 15;
       const timer = setTimeout(() => {
         this.onPlaybackFinished(socket, context, `timer_fallback_${markName}`);
       }, fallbackMs);
@@ -1057,6 +1199,11 @@ export class ExotelStreamGatewayService {
       context.noSpeechTimer = null;
     }
     context.audioBufferChunks = [];
+    context.turnSilenceChunks = 0;
+    context.turnSilenceMs = 0;
+    context.turnSpeechMs = 0;
+    context.turnTotalChunks = 0;
+    context.bargeInFrames = 0;
 
     if (context.streamSid) {
       this.activeStreams.delete(context.streamSid);

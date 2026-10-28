@@ -2,7 +2,7 @@
  * SwasthyaSetu — Voice Telephony Hardening & Multilingual Resolution Test Suite
  * Validates all 36 mandatory verification points for Phase F voice assistant & Exotel telephony:
  * 1. 3-Language restriction (en-IN, kn-IN, hi-IN)
- * 2. Canonical E.164 helpline (+918047288814) and phone normalization
+ * 2. Canonical E.164 helpline (+918047289440) and phone normalization
  * 3. Exotel outbound call contract, classified error handling (401, 403), zero secret leakage
  * 4. Website language to outbound voice session language alignment
  * 5. Direct inbound helpline 4-tier language resolution hierarchy
@@ -129,34 +129,34 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
   // GROUP 2: CANONICAL HELPLINE & NORMALIZATION (Points 4, 5, 6, 7, 33)
   // ============================================================
   describe("Group 2: Canonical Helpline Number & Normalization", () => {
-    it("Point 4: Normalization of '08047288814' → '+918047288814'", () => {
-      expect(toE164IndianPhoneNumber("08047288814")).toBe("+918047288814");
-      expect(normalizeIndianPhoneNumber("08047288814")).toBe("8047288814");
+    it("Point 4: Normalization of '08047289440' → '+918047289440'", () => {
+      expect(toE164IndianPhoneNumber("08047289440")).toBe("+918047289440");
+      expect(normalizeIndianPhoneNumber("08047289440")).toBe("8047289440");
     });
 
-    it("Point 5: Normalization of '+918047288814' → '+918047288814'", () => {
-      expect(toE164IndianPhoneNumber("+918047288814")).toBe("+918047288814");
-      expect(normalizeIndianPhoneNumber("+918047288814")).toBe("8047288814");
+    it("Point 5: Normalization of '+918047289440' → '+918047289440'", () => {
+      expect(toE164IndianPhoneNumber("+918047289440")).toBe("+918047289440");
+      expect(normalizeIndianPhoneNumber("+918047289440")).toBe("8047289440");
     });
 
-    it("Point 6: Normalization of '8047288814' → '+918047288814'", () => {
-      expect(toE164IndianPhoneNumber("8047288814")).toBe("+918047288814");
-      expect(normalizeIndianPhoneNumber("8047288814")).toBe("8047288814");
+    it("Point 6: Normalization of '8047289440' → '+918047289440'", () => {
+      expect(toE164IndianPhoneNumber("8047289440")).toBe("+918047289440");
+      expect(normalizeIndianPhoneNumber("8047289440")).toBe("8047289440");
     });
 
-    it("Point 7: Normalization of '080-4728-8814' or formatted numbers", () => {
-      expect(toE164IndianPhoneNumber("080-4728-8814")).toBe("+918047288814");
-      expect(toE164IndianPhoneNumber("+91 80472 88814")).toBe("+918047288814");
-      expect(toDisplayIndianPhoneNumber("+918047288814")).toBe("08047288814");
-      expect(toDisplayIndianPhoneNumber("8047288814")).toBe("08047288814");
+    it("Point 7: Normalization of '080-4728-9440' or formatted numbers", () => {
+      expect(toE164IndianPhoneNumber("080-4728-9440")).toBe("+918047289440");
+      expect(toE164IndianPhoneNumber("+91 80472 89440")).toBe("+918047289440");
+      expect(toDisplayIndianPhoneNumber("+918047289440")).toBe("08047289440");
+      expect(toDisplayIndianPhoneNumber("8047289440")).toBe("08047289440");
     });
 
     it("Point 33: Fallback direct helpline uses canonical constants", () => {
-      expect(CANONICAL_HELPLINE_E164).toBe("+918047288814");
-      expect(CANONICAL_HELPLINE_DISPLAY).toBe("08047288814");
+      expect(CANONICAL_HELPLINE_E164).toBe("+918047289440");
+      expect(CANONICAL_HELPLINE_DISPLAY).toBe("08047289440");
       const info = exotelService.getDisplayHelplineInfo();
-      expect(info.virtualNumber).toBe("+918047288814");
-      expect(info.displayHelplineText).toBe("08047288814");
+      expect(info.virtualNumber).toBe("+918047289440");
+      expect(info.displayHelplineText).toBe("08047289440");
     });
   });
 
@@ -182,7 +182,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
       (realService as any).accountSid = "real_sid_123";
       (realService as any).apiKey = "key_test";
       (realService as any).apiToken = "token_test";
-      (realService as any).callerId = "08047288814";
+      (realService as any).callerId = "08047289440";
 
       const result = await realService.initiateOutboundCall({
         toPhoneNumber: "09876543210",
@@ -190,7 +190,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
 
       expect(result.callSid).toBe("call_mock_123");
       expect(capturedBody).toContain("From=09876543210");
-      expect(capturedBody).toContain("CallerId=08047288814");
+      expect(capturedBody).toContain("CallerId=08047289440");
       expect(capturedBody).toContain("CallType=trans");
 
       global.fetch = originalFetch;
@@ -208,7 +208,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
       (service as any).accountSid = "real_sid_123";
       (service as any).apiKey = "key_bad";
       (service as any).apiToken = "token_bad";
-      (service as any).callerId = "08047288814";
+      (service as any).callerId = "08047289440";
 
       await expect(service.initiateOutboundCall({ toPhoneNumber: "9876543210" })).rejects.toThrow(
         ExotelTelephonyError
@@ -237,7 +237,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
       (service as any).accountSid = "real_sid_123";
       (service as any).apiKey = "key_good";
       (service as any).apiToken = "token_good";
-      (service as any).callerId = "08047288814";
+      (service as any).callerId = "08047289440";
 
       try {
         await service.initiateOutboundCall({ toPhoneNumber: "9876543210" });
@@ -263,7 +263,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
       (service as any).accountSid = "real_sid_123";
       (service as any).apiKey = "super_secret_api_key_12345";
       (service as any).apiToken = "super_secret_api_token_67890";
-      (service as any).callerId = "08047288814";
+      (service as any).callerId = "08047289440";
 
       try {
         await service.initiateOutboundCall({ toPhoneNumber: "9876543210" });
@@ -292,7 +292,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
         status: "in-progress",
         accountSid: "acc_test",
         to: "+919876543210",
-        from: "+918047288814",
+        from: "+918047289440",
       });
 
       const { session } = await gatewayService.requestCitizenCall("uid_cit_kn", {
@@ -309,7 +309,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
         status: "in-progress",
         accountSid: "acc_test",
         to: "+919876543210",
-        from: "+918047288814",
+        from: "+918047289440",
       });
 
       const { session } = await gatewayService.requestCitizenCall("uid_cit_hi", {
@@ -326,7 +326,7 @@ describe("Voice Telephony Hardening & Multilingual Resolution", () => {
         status: "in-progress",
         accountSid: "acc_test",
         to: "+919876543210",
-        from: "+918047288814",
+        from: "+918047289440",
       });
 
       const { session } = await gatewayService.requestCitizenCall("uid_cit_en", {

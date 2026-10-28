@@ -146,15 +146,20 @@ The streaming gateway implements the full Exotel Stream Applet message protocol:
 
 Telephony audio undergoes mathematically verified transformations:
 
-1. **Inbound Transcoding**:
-   $$\text{Exotel Base64} \longrightarrow \text{μ-law (PCMU 8kHz)} \longrightarrow \text{Linear 16-bit PCM} \longrightarrow \text{VAD Energy Filter}$$
-   - Energy threshold: $\text{RMS} > 300$ qualifies as voice activity.
-   - Silence threshold: $45 \text{ consecutive silent chunks } (\approx 900\text{ms})$ triggers turn boundary.
+1. **Inbound Transcoding (Linear 16-bit PCM Default)**:
+   $$\text{Exotel Base64 (raw/slin 8kHz)} \longrightarrow \text{Linear 16-bit PCM} \longrightarrow \text{VAD Energy Filter}$$
+   *(Legacy $\mu$-law transcoding is automatically enabled only if Exotel explicitly requests `audio/x-mulaw`).*
+   - Energy threshold: $\text{RMS} > 180$ qualifies as voice activity (captures soft cellular speech while filtering line hiss).
+   - Barge-in threshold: $\text{RMS} > 350$ during outbound assistant playback sends `clear` and interrupts speech.
+   - Silence threshold: $45 \text{ silent chunks } (\approx 900\text{ms})$ or $800\text{ms}$ duration triggers turn boundary.
+   - Min speech threshold: $12 \text{ chunks}$ or $200\text{ms}$ allows brief natural utterances ("Yes", "Ayushman").
    - Max turn window: $350 \text{ chunks } (\approx 7\text{s})$ prevents unbounded accumulation.
 2. **WAV Synthesis**:
    - Assembled PCM buffer is wrapped in a standard 44-byte RIFF/WAV header ($8000\text{Hz}$, 16-bit, mono) and sent via multipart POST to Sarvam STT (`saaras:v3`).
 3. **Outbound Transcoding**:
-   $$\text{Sarvam TTS (bulbul:v3 WAV)} \longrightarrow \text{Extract Raw PCM} \longrightarrow \text{Linear to μ-law} \longrightarrow \text{160B Frame Chunks} \longrightarrow \text{WebSocket}$$
+   $$\text{Sarvam TTS (bulbul:v3 WAV)} \longrightarrow \text{Extract Raw PCM} \longrightarrow \text{Exotel Compliant Chunking (\ge 3.2KB, } 10 \times 320\text{B)} \longrightarrow \text{WebSocket}$$
+   - Chunks are sized to 3,200 bytes (100ms–200ms) and multiples of 320 bytes to eliminate Exotel's 20ms pause jitter penalty.
+   - The trailing chunk is padded with `0x00` silence to guarantee alignment.
 
 ---
 
@@ -172,12 +177,12 @@ All credentials remain strictly **server-side only** in `backend/.env`:
 
 ```env
 # Telephony Credentials (SERVER-SIDE ONLY)
-EXOTEL_ACCOUNT_SID=sabotage1
+EXOTEL_ACCOUNT_SID=yadavicreations1
 EXOTEL_API_KEY=<server-secret>
 EXOTEL_API_TOKEN=<server-secret>
 EXOTEL_BASE_URL=https://api.exotel.com
-EXOTEL_VIRTUAL_NUMBER=08047288814
-EXOTEL_CALLER_ID=08047288814
+EXOTEL_VIRTUAL_NUMBER=08047289440
+EXOTEL_CALLER_ID=08047289440
 
 # Sarvam Indic AI (SERVER-SIDE ONLY)
 SARVAM_API_KEY=<server-secret>
@@ -223,6 +228,6 @@ npm test --prefix backend
    - In Exotel Flow Designer $\longrightarrow$ **Stream Applet** $\longrightarrow$ **Where do you want to send the audio stream?**
    - Enter: `wss://<your-tunnel-domain>/api/v1/voice/stream`
 4. **Dial Helpline**:
-   - Call `08047288814` from your mobile phone.
+   - Call `08047289440` from your mobile phone.
    - Speak after the greeting: *"Mujhe Ayushman Bharat scheme ke baare mein jankari chahiye."*
    - Observe live STT transcription $\to$ AI response synthesis $\to$ audio playback on the phone line!

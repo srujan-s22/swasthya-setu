@@ -102,11 +102,11 @@ export const VOICE_LANGUAGE_OPTIONS = [
 /**
  * Canonical SwasthyaSetu automated helpline phone numbers
  */
-export const CANONICAL_HELPLINE_E164 = "+918047288814";
-export const CANONICAL_HELPLINE_DISPLAY = "08047288814";
+export const CANONICAL_HELPLINE_E164 = "+918047289440";
+export const CANONICAL_HELPLINE_DISPLAY = "08047289440";
 
 /**
- * Normalizes Indian phone numbers into canonical 10-digit format (e.g. 8047288814 or 9876543210)
+ * Normalizes Indian phone numbers into canonical 10-digit format (e.g. 8047289440 or 9876543210)
  */
 export function normalizeIndianPhoneNumber(raw?: string | null): string {
   if (!raw) return "";
@@ -122,10 +122,10 @@ export function normalizeIndianPhoneNumber(raw?: string | null): string {
 /**
  * Normalizes Indian phone numbers into canonical E.164 format (+91XXXXXXXXXX)
  * Examples:
- *   "08047288814"    -> "+918047288814"
- *   "8047288814"     -> "+918047288814"
- *   "+918047288814"  -> "+918047288814"
- *   "+91 8047288814" -> "+918047288814"
+ *   "08047289440"    -> "+918047289440"
+ *   "8047289440"     -> "+918047289440"
+ *   "+918047289440"  -> "+918047289440"
+ *   "+91 8047289440" -> "+918047289440"
  */
 export function toE164IndianPhoneNumber(raw?: string | null): string {
   if (!raw) return "";
@@ -144,7 +144,7 @@ export function toE164IndianPhoneNumber(raw?: string | null): string {
 }
 
 /**
- * Formats Indian phone numbers for local display (e.g. 08047288814)
+ * Formats Indian phone numbers for local display (e.g. 08047289440)
  */
 export function toDisplayIndianPhoneNumber(raw?: string | null): string {
   if (!raw) return "";
@@ -431,12 +431,19 @@ export interface ExotelStreamMarkEvent {
   };
 }
 
+export interface ExotelStreamClearEvent {
+  event: "clear";
+  sequenceNumber?: string;
+  streamSid?: string;
+}
+
 export type ExotelStreamInboundMessage =
   | ExotelStreamConnectedEvent
   | ExotelStreamStartEvent
   | ExotelStreamMediaEvent
   | ExotelStreamStopEvent
-  | ExotelStreamMarkEvent;
+  | ExotelStreamMarkEvent
+  | ExotelStreamClearEvent;
 
 export interface ExotelStreamOutboundMediaMessage {
   event: "media";

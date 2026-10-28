@@ -183,3 +183,47 @@ export function chunkAudioBuffer(buffer: Buffer, chunkSize: number = 160): Buffe
   }
   return chunks;
 }
+
+/**
+ * Chunks an audio buffer to comply with Exotel Voicebot / AgentStream requirements:
+ * 1. Minimum chunk size >= 3,200 bytes (or aligned to multiple of 320 for smaller buffers)
+ * 2. Every chunk must be an exact multiple of 320 bytes (e.g. 3,200 bytes = 10 * 320)
+ * 3. Final chunk is padded with 0x00 silence so no partial fragments cause Exotel's 20ms pause penalty
+ */
+export function chunkExotelAudioBuffer(
+  buffer: Buffer,
+  targetChunkSize: number = 3200,
+  alignment: number = 320
+): Buffer[] {
+  if (!buffer || buffer.length === 0) return [];
+
+  // Guarantee effective chunk size is an exact multiple of alignment
+  const effectiveChunkSize = Math.max(alignment, Math.floor(targetChunkSize / alignment) * alignment);
+
+  const chunks: Buffer[] = [];
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    const end = Math.min(offset + effectiveChunkSize, buffer.length);
+    let chunk = buffer.subarray(offset, end);
+    offset = end;
+
+    // Pad trailing chunk with 0x00 silence to satisfy multiple of alignment
+    const remainder = chunk.length % alignment;
+    if (remainder !== 0) {
+      const paddingNeeded = alignment - remainder;
+      chunk = Buffer.concat([chunk, Buffer.alloc(paddingNeeded, 0)]);
+    }
+
+    // If chunk is the final chunk and total buffer is >= targetChunkSize but trailing chunk is < targetChunkSize,
+    // pad with silence to targetChunkSize to prevent Exotel jitter buffer under-run
+    if (buffer.length >= targetChunkSize && chunk.length < targetChunkSize) {
+      const paddingNeeded = targetChunkSize - chunk.length;
+      chunk = Buffer.concat([chunk, Buffer.alloc(paddingNeeded, 0)]);
+    }
+
+    chunks.push(chunk);
+  }
+
+  return chunks;
+}

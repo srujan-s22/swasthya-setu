@@ -10,7 +10,7 @@
  *     ✓ household.region (village, district, state)
  *     ✓ schemes[].name, benefit (localized when available)
  *     ✓ asha.displayName, serviceArea
- *     ✓ public helpline (08047288814)
+ *     ✓ public helpline (08047289440)
  * - FORBIDDEN: Raw objects, bearer tokens, token hashes, UIDs, member rosters,
  *   diagnoses, income, private household phone numbers MUST NEVER enter speech synthesis.
  *
