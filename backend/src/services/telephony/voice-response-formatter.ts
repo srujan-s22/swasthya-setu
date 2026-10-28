@@ -337,12 +337,12 @@ export class VoiceResponseFormatter {
   public static getTimeoutReprompt(lang?: string): string {
     const l = toVoiceLanguage(lang);
     if (l === "kn-IN") {
-      return "ನೀವು ನನ್ನನ್ನು ಕೇಳುತ್ತಿದ್ದೀರಾ? ನೀವು ಯಾವುದೇ ಸರ್ಕಾರಿ ಆರೋಗ್ಯ ಯೋಜನೆಯ ಬಗ್ಗೆ ಕೇಳಬಹುದು.";
+      return "ನಿಮ್ಮ ಧ್ವನಿ ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ ತಿಳಿಸಿ.";
     }
     if (l === "hi-IN") {
-      return "क्या आप मुझे सुन पा रहे हैं? आप किसी भी सरकारी स्वास्थ्य योजना के बारे में पूछ सकते हैं।";
+      return "मैं आपकी बात स्पष्ट रूप से नहीं सुन सका। कृपया बताएं कि मैं आपकी क्या सहायता कर सकता हूँ।";
     }
-    return "Are you there? You can ask me about any government health scheme.";
+    return "I couldn't hear you clearly. Please tell me how I can help.";
   }
 
   public static getTimeoutGoodbye(lang?: string): string {

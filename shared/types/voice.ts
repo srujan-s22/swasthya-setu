@@ -360,6 +360,19 @@ export interface VoiceHealthResponse {
 }
 
 /**
+ * Real-Time Telephony Voicebot Stream Lifecycle States
+ */
+export type VoiceStreamState =
+  | "INITIALIZING"
+  | "PLAYING_GREETING"
+  | "WAITING_FOR_PLAYBACK_COMPLETE"
+  | "LISTENING"
+  | "PROCESSING_STT"
+  | "PROCESSING_INTENT"
+  | "PLAYING_RESPONSE"
+  | "COMPLETED";
+
+/**
  * Exotel WebSocket Stream Inbound & Outbound Event Types
  */
 export type ExotelStreamEventType =

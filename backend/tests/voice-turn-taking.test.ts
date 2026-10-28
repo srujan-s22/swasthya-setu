@@ -61,12 +61,15 @@ describe("Voice Turn-Taking & Exotel Input Collection Flow", () => {
       session,
       mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 },
       language: lang,
+      state: (overrides?.state ?? "LISTENING") as any,
       turnCount: 0,
       maxTurns: 10,
       startTime: Date.now(),
       durationTimer: null,
       audioBufferChunks: [],
       turnSilenceChunks: 0,
+      turnSilenceMs: 0,
+      turnSpeechMs: 0,
       turnTotalChunks: 0,
       isProcessingTurn: false,
       isPlayingGreeting: false,
@@ -74,11 +77,15 @@ describe("Voice Turn-Taking & Exotel Input Collection Flow", () => {
       currentMarkName: null,
       playbackFallbackTimer: null,
       noSpeechTimer: null,
+      echoGuardUntil: 0,
       timeoutCount: 0,
       consecutiveFallbacks: 0,
+      consecutiveEmptyStt: 0,
+      sttErrorCount: 0,
       isWaitingForCaller: false,
       initialGreetingSent: false,
       isStopped: false,
+      bargeInFrames: 0,
       ...overrides,
     };
   }
@@ -410,5 +417,108 @@ describe("Voice Turn-Taking & Exotel Input Collection Flow", () => {
 
     // Call does not loop forever
     expect(context.turnCount).toBe(3);
+  });
+
+  // =========================================================================
+  // SCENARIO 7: STT SERVICE FAILURE & BOUNDED ERROR RECOVERY
+  // =========================================================================
+  it("Scenario 7: STT API failure recovers politely on first attempt and terminates gracefully on second", async () => {
+    const context = await initTestSession("en-IN");
+    vi.spyOn(sarvamService, "textToSpeech").mockResolvedValue({
+      audios: [Buffer.alloc(364).toString("base64")],
+    });
+
+    // Mock STT error (e.g. HTTP 500 or network timeout)
+    vi.spyOn(sarvamService, "speechToText").mockRejectedValue(new Error("STT network timeout"));
+
+    // 1. First STT error: reprompts politely once
+    context.audioBufferChunks = [createSpeechChunk(4000)];
+    await streamGateway.processSpeechTurn(mockSocket, context);
+
+    expect(context.sttErrorCount).toBe(1);
+    expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+      VoiceResponseFormatter.getSttRetryPrompt("en-IN"),
+      "en-IN"
+    );
+
+    // Assistant acknowledges playback and resumes waiting
+    streamGateway.onPlaybackFinished(mockSocket, context, "mark:stt_err_1");
+    expect(context.state).toBe("LISTENING");
+    expect(context.isWaitingForCaller).toBe(true);
+
+    // 2. Second consecutive STT error: does not loop indefinitely, plays farewell
+    context.audioBufferChunks = [createSpeechChunk(4000)];
+    await streamGateway.processSpeechTurn(mockSocket, context);
+
+    expect(context.sttErrorCount).toBe(2);
+    expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+      VoiceResponseFormatter.getEndCall("en-IN"),
+      "en-IN"
+    );
+  });
+
+  // =========================================================================
+  // SCENARIO 8: IDEMPOTENCY — DUPLICATE MARKS AND FALLBACK TIMERS
+  // =========================================================================
+  it("Scenario 8: Concurrent mark events and fallback timers are idempotent and do not trigger duplicate turns", async () => {
+    const context = await initTestSession("kn-IN", {
+      state: "WAITING_FOR_PLAYBACK_COMPLETE",
+      currentMarkName: "turn_greeting_kn",
+    });
+
+    // First playback finish (from Exotel mark event)
+    streamGateway.onPlaybackFinished(mockSocket, context, "mark:turn_greeting_kn");
+    expect(context.state).toBe("LISTENING");
+    expect(context.isWaitingForCaller).toBe(true);
+
+    // Stale duplicate mark event arriving late
+    const markSpy = vi.spyOn(streamGateway, "startNoSpeechTimer");
+    streamGateway.handleMarkEvent(mockSocket, context, {
+      event: "mark",
+      streamSid: context.streamSid,
+      mark: { name: "stale_old_mark" },
+    });
+    // Should be ignored because mark name does not match
+    expect(context.state).toBe("LISTENING");
+
+    // Second call to onPlaybackFinished from timer race
+    streamGateway.onPlaybackFinished(mockSocket, context, "timer_fallback_turn_greeting_kn");
+    // State remains LISTENING, does not trigger duplicate state change or turn
+    expect(context.state).toBe("LISTENING");
+  });
+
+  // =========================================================================
+  // SCENARIO 9: STREAM DISCONNECT & TEARDOWN
+  // =========================================================================
+  it("Scenario 9: Disconnect and stop events safely clear all timers, active streams, and session state", async () => {
+    const context = await initTestSession("hi-IN", {
+      state: "LISTENING",
+      noSpeechTimer: setTimeout(() => {}, 10000),
+      playbackFallbackTimer: setTimeout(() => {}, 5000),
+      durationTimer: setTimeout(() => {}, 300000),
+      audioBufferChunks: [createSpeechChunk(4000)],
+    });
+
+    if (context.streamSid) {
+      (streamGateway as any).activeStreams.set(context.streamSid, context);
+      expect(streamGateway.getActiveStream(context.streamSid)).toBeDefined();
+    }
+
+    // Stop event received
+    await streamGateway.handleStreamEvent(mockSocket, context, {
+      event: "stop",
+      streamSid: context.streamSid,
+    });
+
+    expect(context.isStopped).toBe(true);
+    expect(context.state).toBe("COMPLETED");
+    expect(context.audioBufferChunks.length).toBe(0);
+    expect(context.noSpeechTimer).toBeNull();
+    expect(context.playbackFallbackTimer).toBeNull();
+    expect(context.durationTimer).toBeNull();
+
+    if (context.streamSid) {
+      expect(streamGateway.getActiveStream(context.streamSid)).toBeUndefined();
+    }
   });
 });
